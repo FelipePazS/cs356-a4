@@ -60,7 +60,15 @@ class SWPSender:
         self._recv_thread = threading.Thread(target=self._recv)
         self._recv_thread.start()
 
-        # TODO: Add additional state variables
+        self.send_window_semaphore = threading.Semaphore(SWPSender._SEND_WINDOW_SIZE)
+        self.counter_semaphore = threading.Semaphore(1)
+        self.counter = 0
+        self.last_ack = 0
+
+        # array of packets and timers
+        self.timers = {}
+        self.packets = {}
+
 
 
     def send(self, data):
@@ -68,13 +76,26 @@ class SWPSender:
             self._send(data[i:i+SWPPacket.MAX_DATA_SIZE])
 
     def _send(self, data):
-        # TODO
+        self.send_window_semaphore.acquire()
+        self.counter_semaphore.acquire()
+        seq_num = self.counter
+        self.counter = self.counter + 1
+        self.counter_semaphore.release()
 
+        swp = SWPPacket(SWPType.DATA, seq_num, data)
+        self.packets[seq_num] = swp
+        self._llp_endpoint.send(swp.to_bytes())
+        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, seq_num)
+        self.timers[seq_num] = timer
+        timer.start()
         return
         
     def _retransmit(self, seq_num):
-        # TODO
-
+        swp = SWPPacket(SWPType.DATA, seq_num, self.packets[seq_num])
+        self._llp_endpoint.send(swp.to_bytes())
+        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, seq_num)
+        self.timers[seq_num] = timer
+        timer.start()
         return 
 
     def _recv(self):
@@ -85,8 +106,19 @@ class SWPSender:
                 continue
             packet = SWPPacket.from_bytes(raw)
             logging.debug("Received: %s" % packet)
+            if not packet._type == SWPType.ACK:
+                continue
+            
+            seq_num = packet._seq_num
+            timer = self.timers[seq_num]
+            timer.cancel()
 
-            # TODO
+            for i in range(self.last_ack + 1, seq_num + 1):
+                self.timers.pop(i)
+                self.packets.pop(i)
+
+            self.last_ack = seq_num
+            self.send_window_semaphore.release()
 
         return
 
