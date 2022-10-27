@@ -135,8 +135,8 @@ class SWPReceiver:
         # Start receive thread
         self._recv_thread = threading.Thread(target=self._recv)
         self._recv_thread.start()
-        
-        # TODO: Add additional state variables
+    
+        self.packets = {}
 
 
     def recv(self):
@@ -148,7 +148,25 @@ class SWPReceiver:
             raw = self._llp_endpoint.recv()
             packet = SWPPacket.from_bytes(raw)
             logging.debug("Received: %s" % packet)
-            
-            # TODO
+            top_ack_seq_num = 0
+            # retransmit if already acknowledged 
+            if packet._type == SWPType.ACK:
+                # retransmit
+                continue 
+
+            # buffer
+            self.packets[packet.seq_num] = packet
+            # add to ready queue
+            seq_number_all_received = 0
+            for i in range(len(self.packets)) :
+                if not self.packets[i] :
+                    # Sequence number where all packets up to this have been received
+                    seq_number_all_received = i - 1
+                    break
+                self._ready_data.put(self.packets[i])
+
+            # send packet with seq num ^
+            swp = SWPPacket(SWPType.DATA, seq_number_all_received, self.packets[seq_number_all_received])
+            self._llp_endpoint.send(swp.to_bytes())
 
         return
