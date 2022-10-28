@@ -61,7 +61,6 @@ class SWPSender:
         self._recv_thread.start()
 
         self.send_window_semaphore = threading.Semaphore(SWPSender._SEND_WINDOW_SIZE)
-        self.counter_semaphore = threading.Semaphore(1)
         self.counter = 0
         self.last_ack = 0
 
@@ -77,23 +76,24 @@ class SWPSender:
 
     def _send(self, data):
         self.send_window_semaphore.acquire()
-        self.counter_semaphore.acquire()
+        logging.debug("ACQUIRED")
         seq_num = self.counter
         self.counter = self.counter + 1
-        self.counter_semaphore.release()
 
         swp = SWPPacket(SWPType.DATA, seq_num, data)
         self.packets[seq_num] = swp
+        logging.debug("Sent: %s" % swp)
         self._llp_endpoint.send(swp.to_bytes())
-        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, seq_num)
+        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, [self, seq_num])
         self.timers[seq_num] = timer
         timer.start()
         return
         
     def _retransmit(self, seq_num):
-        swp = SWPPacket(SWPType.DATA, seq_num, self.packets[seq_num])
+        swp = self.packets.get(seq_num)
+        logging.debug("Sent: %s" % swp)
         self._llp_endpoint.send(swp.to_bytes())
-        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, seq_num)
+        timer = threading.Timer(SWPSender._TIMEOUT, SWPSender._retransmit, [self, seq_num])
         self.timers[seq_num] = timer
         timer.start()
         return 
@@ -113,12 +113,9 @@ class SWPSender:
             timer = self.timers[seq_num]
             timer.cancel()
 
-            for i in range(self.last_ack + 1, seq_num + 1):
-                self.timers.pop(i)
-                self.packets.pop(i)
-
-            self.last_ack = seq_num
             self.send_window_semaphore.release()
+            logging.debug("RELEASED")
+            self.last_ack = seq_num
 
         return
 
@@ -138,6 +135,8 @@ class SWPReceiver:
     
         self.packets = {}
 
+        self.highest_ack_seq_num = 0
+
 
     def recv(self):
         return self._ready_data.get()
@@ -148,25 +147,39 @@ class SWPReceiver:
             raw = self._llp_endpoint.recv()
             packet = SWPPacket.from_bytes(raw)
             logging.debug("Received: %s" % packet)
-            top_ack_seq_num = 0
             # retransmit if already acknowledged 
             if packet._type == SWPType.ACK:
                 # retransmit
                 continue 
 
-            # buffer
-            self.packets[packet.seq_num] = packet
-            # add to ready queue
-            seq_number_all_received = 0
-            for i in range(len(self.packets)) :
-                if not self.packets[i] :
-                    # Sequence number where all packets up to this have been received
-                    seq_number_all_received = i - 1
-                    break
-                self._ready_data.put(self.packets[i])
+            # 1. Check if the chunk of data was already acknowledged and retransmit an SWP ACK containing the highest acknowledged sequence number
+            if (packet.seq_num <= self.highest_ack_seq_num and not packet.seq_num == 0):
+                swp = SWPPacket(SWPType.ACK, packet.seq_num)
+                self._llp_endpoint.send(swp.to_bytes())
+                continue
 
-            # send packet with seq num ^
-            swp = SWPPacket(SWPType.DATA, seq_number_all_received, self.packets[seq_number_all_received])
+            # if the packet comes with a sequence number greater than the last read + windows size, drop the packet
+            
+
+            # 2. Add the chunk of data to a buffer—in case it is out of order.
+            # self.packets[packet.seq_num % SWPSender._SEND_WINDOW_SIZE] = packet
+            self.packets[packet.seq_num] = packet
+
+            # 3. Traverse the buffer, starting from the first buffered chunk of data, 
+            # until reaching a “hole”—i.e., a missing chunk of data. All chunks of data prior to this hole 
+            # should be placed in the _ready_data queue, which is where data is read from when an “application” 
+            # (e.g., server.py) calls recv, and removed from the buffer.
+            if packet.seq_num == 0:
+                self._ready_data.put(self.packets.pop(packet.seq_num).data)
+            else:
+                for i in range(self.highest_ack_seq_num + 1, self.highest_ack_seq_num + 1 + len(self.packets)) :
+                    if not i in self.packets:
+                        break
+                    self.highest_ack_seq_num = i
+                    self._ready_data.put(self.packets.pop(i).data)
+            # 4. Send an acknowledgement for the highest sequence number for which all data chunks up to and including that sequence number have been received.
+            swp = SWPPacket(SWPType.ACK, self.highest_ack_seq_num)
+            logging.debug("Sent: %s" % swp)
             self._llp_endpoint.send(swp.to_bytes())
 
         return
