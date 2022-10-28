@@ -76,7 +76,6 @@ class SWPSender:
 
     def _send(self, data):
         self.send_window_semaphore.acquire()
-        logging.debug("ACQUIRED")
         seq_num = self.counter
         self.counter = self.counter + 1
 
@@ -114,7 +113,6 @@ class SWPSender:
             timer.cancel()
 
             self.send_window_semaphore.release()
-            logging.debug("RELEASED")
             self.last_ack = seq_num
 
         return
@@ -149,7 +147,6 @@ class SWPReceiver:
             logging.debug("Received: %s" % packet)
             # retransmit if already acknowledged 
             if packet._type == SWPType.ACK:
-                # retransmit
                 continue 
 
             # 1. Check if the chunk of data was already acknowledged and retransmit an SWP ACK containing the highest acknowledged sequence number
@@ -159,7 +156,10 @@ class SWPReceiver:
                 continue
 
             # if the packet comes with a sequence number greater than the last read + windows size, drop the packet
-            
+            if len(self.packets) > SWPReceiver._RECV_WINDOW_SIZE:
+                logging.debug("Dropped")
+                continue
+
 
             # 2. Add the chunk of data to a buffer—in case it is out of order.
             # self.packets[packet.seq_num % SWPSender._SEND_WINDOW_SIZE] = packet
